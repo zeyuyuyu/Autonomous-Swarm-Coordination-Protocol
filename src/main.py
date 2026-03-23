@@ -1,35 +1,68 @@
-import numpy as np
-import networkx as nx
-from typing import List
+import asyncio
+from typing import List, Any, Callable, Coroutine
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 
-class SwarmCoordinator:
-    def __init__(self, num_agents: int, comm_radius: float):
-        self.num_agents = num_agents
-        self.comm_radius = comm_radius
-        self.positions = np.random.uniform(-1, 1, size=(num_agents, 2))
-        self.velocities = np.zeros((num_agents, 2))
-        self.neighbors = self.compute_neighbors()
+@dataclass
+class Task:
+    func: Callable
+    args: tuple
+    priority: int = 0
 
-    def compute_neighbors(self) -> List[List[int]]:
-        G = nx.Graph()
-        G.add_nodes_from(range(self.num_agents))
-        for i in range(self.num_agents):
-            for j in range(i+1, self.num_agents):
-                if np.linalg.norm(self.positions[i] - self.positions[j]) <= self.comm_radius:
-                    G.add_edge(i, j)
-        return [list(G.neighbors(i)) for i in range(self.num_agents)]
+class TaskQueue:
+    def __init__(self, max_workers: int = 4):
+        self.tasks: List[Task] = []
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.running = False
 
-    def update_positions(self):
-        for i in range(self.num_agents):
-            neighbor_positions = [self.positions[j] for j in self.neighbors[i]]
-            self.velocities[i] = np.mean(neighbor_positions, axis=0) - self.positions[i]
-            self.positions[i] += self.velocities[i]
+    async def add_task(self, func: Callable, *args, priority: int = 0):
+        task = Task(func=func, args=args, priority=priority)
+        self.tasks.append(task)
+        self.tasks.sort(key=lambda x: x.priority, reverse=True)
 
-    def run(self, num_steps: int):
-        for _ in range(num_steps):
-            self.update_positions()
-            self.neighbors = self.compute_neighbors()
+    async def process_tasks(self) -> List[Any]:
+        if not self.tasks:
+            return []
 
-if __name__ == '__main__':
-    coordinator = SwarmCoordinator(num_agents=50, comm_radius=0.2)
-    coordinator.run(num_steps=100)
+        self.running = True
+        results = []
+
+        while self.tasks and self.running:
+            current_tasks = self.tasks[:self.executor._max_workers]
+            self.tasks = self.tasks[self.executor._max_workers:]
+
+            futures = []
+            for task in current_tasks:
+                future = self.executor.submit(task.func, *task.args)
+                futures.append(future)
+
+            for future in futures:
+                try:
+                    result = await asyncio.wrap_future(future)
+                    results.append(result)
+                except Exception as e:
+                    results.append(e)
+
+        return results
+
+    def stop(self):
+        self.running = False
+
+async def main():
+    # Example usage
+    queue = TaskQueue(max_workers=2)
+
+    def example_task(x: int) -> int:
+        return x * 2
+
+    # Add some sample tasks
+    await queue.add_task(example_task, 1, priority=2)
+    await queue.add_task(example_task, 2, priority=1)
+    await queue.add_task(example_task, 3, priority=3)
+
+    # Process all tasks and get results
+    results = await queue.process_tasks()
+    print(f"Results: {results}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
